@@ -1,0 +1,7 @@
+Exercise 7
+----------
+
+*	Run the program function.out
+*	Generate different y values by giving different x values as input.
+*	Use objdump on the program function.out to find the values a, b, c, and d.
+*	Run the program and verify the values of a, b, c, and d.

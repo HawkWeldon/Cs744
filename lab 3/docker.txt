@@ -1,0 +1,10 @@
+sudo docker pull arghyadipchak/xv6-riscv-devbox:latest
+sudo docker run --rm \
+--interactive --tty \
+--name xv6-devbox \
+--hostname xv6 \
+--user $(id -u):$(id -g) \
+--volume /etc/passwd:/etc/passwd:ro \
+--volume /etc/group:/etc/group:ro \
+--volume ./xv6-riscv:/xv6-riscv \
+arghyadipchak/xv6-riscv-devbox:latest
