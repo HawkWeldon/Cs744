@@ -30,8 +30,23 @@ char* pingPong(char* input)
     else return "invalid"
 }
 
-int prime ()
+int prime(int key)
+{
+    if (key < 2) return 0;
 
+    if (key < 4) return 1;
+
+    if (key % 2 == 0) return 0;
+
+    for (int i = 5; i*i <= key; i+=2)
+    {
+        if (key % i == 0) return 0;
+    }
+
+    return 1;
+}
+
+int fib
 int main()
 {
     return 0;
