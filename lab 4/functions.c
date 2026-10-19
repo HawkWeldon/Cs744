@@ -1,52 +1,31 @@
 #include <stdio.h>
-#include <math.h>
 #include <string.h>
 #include "functions.h"
 
-int root(int key)
+void root(char *args, char *response, size_t size)
 {
-    return sqrt(key);
+    snprintf(response, size, "Hello world!!!");
 }
 
-int square(int key)
+void square(char *args, char *response, size_t size)
 {
-    return key*key;
+    int num = 1;
+    if (args) num = atoi(args);
+    snprintf(response, size, "%d", num * num);
 }
 
-int cube(int key)
+void cube(char *args, char *response, size_t size)
 {
-    return key*key*key;
+    int num = 1;
+    if (args) num = atoi(args);
+    snprintf(response, size, "%d", num * num * num);
 }
 
-char* helloworld()
+void helloworld(char *args, char *respone, size_t size)
 {
-    return "Hello world!!!"
+    
 }
 
-char* pingPong(char* input)
-{
-    if (strcmp(input, "ping")) return "pong";
-    else if (strcmp(input, "pong")) return "ping";
-    else return "invalid"
-}
-
-int prime(int key)
-{
-    if (key < 2) return 0;
-
-    if (key < 4) return 1;
-
-    if (key % 2 == 0) return 0;
-
-    for (int i = 5; i*i <= key; i+=2)
-    {
-        if (key % i == 0) return 0;
-    }
-
-    return 1;
-}
-
-int fib
 int main()
 {
     return 0;
