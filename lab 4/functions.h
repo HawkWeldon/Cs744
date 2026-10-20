@@ -5,6 +5,8 @@ typedef struct
 } 
 Route;
 
+#define NUM_FUNCS 7
+
 enum ID
 {
     ROOT,
