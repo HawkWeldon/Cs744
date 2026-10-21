@@ -20,7 +20,50 @@
 */
 
 
-int main() {
+int main(int argc, char *argv[]) 
+{
+
+    if(argv !=3 || strcmp(argv[1], "s") != 0)
+    {
+        fprintf(stderr, "Error 1");
+        return 1;
+    }
+
+    char *end;
+    long port = strtol(argv[2], &end, 10);
+   
+    if(*argv[2] == '\0' || *end != '\0' || port < 1|| port > 65535)
+    {
+        fprintf(stderr, "Error 2");
+        return 1;
+    }
+
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    
+    if (server_fd == -1)
+    {
+        fprintf(stderr, "Error 3");
+        return 1;
+    }
+
+    struct sockaddr_in address = {0};
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons((unsigned short)port);
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == -1)
+    {
+        fprintf(stderr, "Error 4");
+        close(server_fd);
+        return 1;
+    }
+
+    if ()
+    {
+        
+    }
+
     // Example raw HTTP POST request string
     char raw_request[] = 
         "POST /submit-form?name=Buzz HTTP/1.1\r\n"
