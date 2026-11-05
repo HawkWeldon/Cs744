@@ -23,7 +23,7 @@
 int main(int argc, char *argv[]) 
 {
 
-    if(argv !=3 || strcmp(argv[1], "s") != 0)
+    if(argc !=3 || strcmp(argv[1], "s") != 0)
     {
         fprintf(stderr, "Error 1");
         return 1;
@@ -59,52 +59,98 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if ()
+    if (listen(server_fd, 128) == -1)
     {
-        
+        fprintf(stderr, "Error 5");
+        close(server_fd);
+        return 1;
     }
 
-    // Example raw HTTP POST request string
-    char raw_request[] = 
-        "POST /submit-form?name=Buzz HTTP/1.1\r\n"
-        "Host: localhost:8080\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: 18\r\n"
-        "\r\n"
-        "{\"username\":\"dev\"}";
+    printf("===============cflask is in business===============\n");
 
-    ParsedRequest req;
-    parse_http_request(raw_request, &req);
 
-    // Print parsed output to verify
-    printf("--- Request Line ---\n");
-    printf("Method:  %s\n", req.request_line.method);
-    printf("URI:     %s\n", req.request_line.uri);
-    printf("Version: %s\n\n", req.request_line.version);
+    while(1)
+    {
+        int client_fd = accept(server_fd, NULL, NULL);
 
-    printf("--- Headers parsed: %d ---\n", req.header_count);
-    for (int i = 0; i < req.header_count; i++) {
-        printf("%s -> %s\n", req.headers[i].key, req.headers[i].value);
+        if (client_fd == -1)
+        {
+            fprintf(stderr, "Error 6");
+            continue;
+        }
+
+        char buffer[8192];
+
+        ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) -1 , 0);
+
+        if (bytes > 0)
+        {
+            buffer[bytes] = '\0';
+            ParsedRequest req = {0};
+            parse_http_request(buffer, &req);
+
+            printf("Method: %s\n", req.request_line.method);
+            printf("URI: %s\n", req.request_line.uri);
+        }
+
+        const char *body = "WHATS UP WORLD";
+        size_t response_size = 0;
+
+        char* http_response = create_http_response("200 0K", "text/plain", body, strlen(body), &response_size);
+        if (http_response != NULL)
+        {
+            send(client_fd, http_response, response_size, 0);
+            free(http_response);
+        }
+
+        close(client_fd);
     }
 
-    if (req.body) {
-        printf("\n--- Body ---\n%s\n\n", req.body);
-    }
+    close(server_fd);
+    
+    
+    
+    // // Example raw HTTP POST request string
+    // char raw_request[] = 
+    //     "POST /submit-form?name=Buzz HTTP/1.1\r\n"
+    //     "Host: localhost:8080\r\n"
+    //     "Content-Type: application/json\r\n"
+    //     "Content-Length: 18\r\n"
+    //     "\r\n"
+    //     "{\"username\":\"dev\"}";
+
+    // ParsedRequest req;
+    // parse_http_request(raw_request, &req);
+
+    // // Print parsed output to verify
+    // printf("--- Request Line ---\n");
+    // printf("Method:  %s\n", req.request_line.method);
+    // printf("URI:     %s\n", req.request_line.uri);
+    // printf("Version: %s\n\n", req.request_line.version);
+
+    // printf("--- Headers parsed: %d ---\n", req.header_count);
+    // for (int i = 0; i < req.header_count; i++) {
+    //     printf("%s -> %s\n", req.headers[i].key, req.headers[i].value);
+    // }
+
+    // if (req.body) {
+    //     printf("\n--- Body ---\n%s\n\n", req.body);
+    // }
 
     
-    const char *body = "{\"status\":\"success\",\"message\":\"Hello from C server!\"}";
-    size_t len = strlen(body);
-    size_t response_size = 0;
+    // const char *body = "{\"status\":\"success\",\"message\":\"Hello from C server!\"}";
+    // size_t len = strlen(body);
+    // size_t response_size = 0;
 
-    char *http_response = create_http_response("200 OK", "text/html", body, len, &response_size);
+    // char *http_response = create_http_response("200 OK", "text/html", body, len, &response_size);
 
-    if (http_response) {
-        printf("--- Generated HTTP Response (%zu bytes) ---\n", response_size);
-        printf("%s\n", http_response);
+    // if (http_response) {
+    //     printf("--- Generated HTTP Response (%zu bytes) ---\n", response_size);
+    //     printf("%s\n", http_response);
         
-        // Clean up allocated memory
-        free(http_response);
-    }
+    //     // Clean up allocated memory
+    //     free(http_response);
+    // }
 
     return 0;
 }
