@@ -26,7 +26,7 @@
                                     {"/cube", CUBE},
                                     {"/helloworld", HELLOWORLD},
                                     {"/pingpong", PINGPONG},
-                                    {"/prime", PRIME},
-                                    {"/fib", FIB}               };
+                                    {"/arithmetic/prime", PRIME},
+                                    {"/arithmetic/fibonacci", FIB}               };
 
 #endif

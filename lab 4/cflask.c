@@ -1,27 +1,30 @@
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
+#include <sys/time.h>
+#include <signal.h>
+#include<stdatomic.h>
 
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <pthread.h>
 
 #include "http-parser.h"
 #include "functions.h"
 #include "functions_list.h"
-#include <pthread.h>
 
-/* 
-* Implement all the cflask logic here.
-* 1. web server initialization 
-* 2. accept http requests
-* 3. parse http requests
-* 4. dispatch http requests
-* 5. process, generate and send http responses
-*/
+#define BUFFER_SIZE 8192
+#define RESPONSE_SIZE 1024
 #define QUEUE_SIZE 1024
 
+// Thread pool queue
+
 int client_queue[QUEUE_SIZE];
+
 int queue_front = 0;
 int queue_rear = 0;
 int queue_count = 0;
@@ -29,6 +32,16 @@ int queue_count = 0;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
 pthread_cond_t queue_not_full = PTHREAD_COND_INITIALIZER;
+
+
+atomic_int server_running = 1;
+int server_fd = -1;
+
+void shutdown_server(int signal_number)
+{
+    (void) signal_number;
+    server_running = 0;
+}
 
 void enqueue(int client_fd)
 {
@@ -40,7 +53,6 @@ void enqueue(int client_fd)
     }
 
     client_queue[queue_rear] = client_fd;
-
     queue_rear = (queue_rear + 1) % QUEUE_SIZE;
     queue_count++;
 
@@ -48,6 +60,7 @@ void enqueue(int client_fd)
 
     pthread_mutex_unlock(&queue_mutex);
 }
+
 
 int dequeue(void)
 {
@@ -70,86 +83,487 @@ int dequeue(void)
     return client_fd;
 }
 
-void *handle_client(void *args)
+
+// HTTP response functions
+
+int send_all(int client_fd, const char *data, size_t length)
 {
-    int client_fd = *(int*)args;
-    free(args);
+    size_t sent = 0;
 
-    char buffer[8192];
-    char body [1024];
-    char response_body[1024];
-
-    ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) -1 , 0);
-
-    if (bytes > 0)
+    while (sent < length)
     {
-        buffer[bytes] = '\0';
-        ParsedRequest req = {0};
-        parse_http_request(buffer, &req);
+        ssize_t n = send(client_fd, data + sent, length - sent, MSG_NOSIGNAL);
 
-        char* path = req.request_line.uri;
-        char* args = NULL;
-
-        char* question_mark = strchr(path, '?');
-
-        if(question_mark)
+        if (n < 0 && errno == EINTR)
         {
-            *question_mark = '\0';
-            args = question_mark + 1;
+            continue;
         }
 
-        printf("Method: %s\n", req.request_line.method);
-        printf("URI: %s\n", req.request_line.uri);
-
-        
-        int function_id = -1;
-
-        for (int i = 0; i < NUM_FUNCS; i++)
+        if (n <= 0)
         {
-            if(strcmp(path, routes[i].url) == 0)
+            return -1;
+        }
+
+        sent += (size_t)n;
+    }
+
+    return 0;
+}
+
+
+void send_response(int client_fd, const char *status, const char *body)
+{
+    size_t response_size = 0;
+
+    char *http_response = create_http_response(
+        status,
+        "text/plain",
+        body,
+        strlen(body),
+        &response_size
+    );
+
+    if (http_response == NULL)
+    {
+        fprintf(stderr, "Error: Could not create HTTP response\n");
+        return;
+    }
+
+    if (send_all(client_fd, http_response, response_size) == -1)
+    {
+        fprintf(stderr, "Error: Could not send HTTP response\n");
+    }
+
+    free(http_response);
+}
+
+
+void send_error(int client_fd, const char *status, const char *message)
+{
+    send_response(client_fd, status, message);
+}
+
+
+// URL decoding
+
+int hex_value(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    else if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+    else if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+
+    return -1;
+}
+
+
+int url_decode(char *str)
+{
+    char *src = str;
+    char *dst = str;
+
+    while (*src != '\0')
+    {
+        if (*src == '%')
+        {
+            if (src[1] == '\0' || src[2] == '\0')
             {
-                function_id = routes[i].id;
+                return -1;
+            }
+
+            int hi = hex_value(src[1]);
+            int lo = hex_value(src[2]);
+
+            if (hi == -1 || lo == -1)
+            {
+                return -1;
+            }
+
+            char decoded = (char)((hi << 4) | lo);
+
+            if (decoded == '\0')
+            {
+                return -1;
+            }
+
+            *dst = decoded;
+            dst++;
+            src += 3;
+        }
+        else if (*src == '+')
+        {
+            *dst = ' ';
+            dst++;
+            src++;
+        }
+        else
+        {
+            *dst = *src;
+            dst++;
+            src++;
+        }
+    }
+
+    *dst = '\0';
+
+    return 0;
+}
+
+
+// Query parameter parsing
+
+int get_query_param(const char *query, const char *key, char **result)
+{
+    *result = NULL;
+
+    if (query == NULL || key == NULL)
+    {
+        return 0;
+    }
+
+    size_t key_len = strlen(key);
+
+    while (*query != '\0')
+    {
+        const char *end = strchr(query, '&');
+
+        if (end == NULL)
+        {
+            end = query + strlen(query);
+        }
+
+        const char *equal_sign = memchr(query, '=', end - query);
+
+        if (equal_sign != NULL)
+        {
+            size_t current_key_len = equal_sign - query;
+
+            if (current_key_len == key_len && strncmp(query, key, key_len) == 0)
+            {
+                const char *value = equal_sign + 1;
+                size_t value_len = end - value;
+
+                char *copy = malloc(value_len + 1);
+
+                if (copy == NULL)
+                {
+                    return -1;
+                }
+
+                memcpy(copy, value, value_len);
+                copy[value_len] = '\0';
+
+                if (url_decode(copy) == -1)
+                {
+                    free(copy);
+                    return -1;
+                }
+
+                *result = copy;
+
+                return 1;
+            }
+        }
+
+        if (*end == '\0')
+        {
+            break;
+        }
+
+        query = end + 1;
+    }
+
+    return 0;
+}
+
+
+// Read HTTP request
+
+ssize_t read_http_request(int client_fd, char *buffer, size_t size)
+{
+    size_t total = 0;
+    size_t expected = 0;
+    int headers_complete = 0;
+
+    while (total < size - 1)
+    {
+        ssize_t bytes = recv(client_fd, buffer + total, size - total - 1, 0);
+
+        if (bytes < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            return -3;
+        }
+
+        if (bytes == 0)
+        {
+            return -1;
+        }
+
+        total += (size_t)bytes;
+        buffer[total] = '\0';
+
+        if (headers_complete == 0)
+        {
+            char *header_end = strstr(buffer, "\r\n\r\n");
+
+            if (header_end != NULL)
+            {
+                headers_complete = 1;
+
+                size_t header_size = header_end + 4 - buffer;
+                size_t content_length = 0;
+                int found_length = 0;
+
+                char *line = strstr(buffer, "\r\n");
+
+                if (line == NULL)
+                {
+                    return -1;
+                }
+
+                line += 2;
+
+                while (line < header_end)
+                {
+                    char *next = strstr(line, "\r\n");
+
+                    if (next == NULL || next > header_end)
+                    {
+                        return -1;
+                    }
+
+                    if (strncasecmp(line, "Content-Length:", 15) == 0)
+                    {
+                        if (found_length)
+                        {
+                            return -1;
+                        }
+
+                        found_length = 1;
+
+                        char *start = line + 15;
+
+                        while (start < next && (*start == ' ' || *start == '\t'))
+                        {
+                            start++;
+                        }
+
+                        if (start == next || !isdigit((unsigned char)*start))
+                        {
+                            return -1;
+                        }
+
+                        errno = 0;
+                        char *endptr;
+
+                        unsigned long long length = strtoull(start, &endptr, 10);
+
+                        while (endptr < next && (*endptr == ' ' || *endptr == '\t'))
+                        {
+                            endptr++;
+                        }
+
+                        if (errno != 0 || endptr != next)
+                        {
+                            return -1;
+                        }
+
+                        if (length > size - 1 - header_size)
+                        {
+                            return -2;
+                        }
+
+                        content_length = (size_t)length;
+                    }
+
+                    if (strncasecmp(line, "Transfer-Encoding:", 18) == 0)
+                    {
+                        return -1;
+                    }
+
+                    line = next + 2;
+                }
+
+                expected = header_size + content_length;
+            }
+        }
+
+        if (headers_complete && total >= expected)
+        {
+            buffer[expected] = '\0';
+            return expected;
+        }
+    }
+
+    return -2;
+}
+
+
+// Client handler
+
+void *handle_client(void *arg)
+{
+    int client_fd = *(int *)arg;
+    free(arg);
+
+    char buffer[BUFFER_SIZE] = {0};
+    char response_body[RESPONSE_SIZE] = {0};
+
+    ssize_t bytes = read_http_request(client_fd, buffer, sizeof(buffer));
+
+    if (bytes <= 0)
+    {
+        if (bytes == -2)
+        {
+            send_error(client_fd, "413 Content Too Large", "Request too large");
+        }
+        else
+        {
+            send_error(client_fd, "400 Bad Request", "Invalid HTTP request");
+        }
+
+        close(client_fd);
+        return NULL;
+    }
+
+    ParsedRequest req = {0};
+    parse_http_request(buffer, &req);
+
+    if (req.request_line.method == NULL || req.request_line.uri == NULL)
+    {
+        send_error(client_fd, "400 Bad Request", "Invalid request line");
+
+        close(client_fd);
+        return NULL;
+    }
+
+    if (strcmp(req.request_line.method, "GET") != 0 &&
+        strcmp(req.request_line.method, "POST") != 0)
+    {
+        send_error(client_fd, "405 Method Not Allowed", "Only GET and POST supported");
+
+        close(client_fd);
+        return NULL;
+    }
+
+    char *path = req.request_line.uri;
+    char *args = NULL;
+
+    char *question_mark = strchr(path, '?');
+
+    if (question_mark != NULL)
+    {
+        *question_mark = '\0';
+        args = question_mark + 1;
+    }
+
+    if (path[0] != '/')
+    {
+        send_error(client_fd, "400 Bad Request", "Invalid request path");
+
+        close(client_fd);
+        return NULL;
+    }
+
+    printf("Method: %s\n", req.request_line.method);
+    printf("URI: %s\n", path);
+
+    int function_id = -1;
+
+    for (int i = 0; i < NUM_FUNCS; i++)
+    {
+        if (strcmp(path, routes[i].url) == 0)
+        {
+            function_id = routes[i].id;
+            break;
+        }
+    }
+
+    if (function_id < 0 || function_id >= NUM_FUNCS)
+    {
+        send_error(client_fd, "404 Not Found", "404 NOT FOUND");
+
+        close(client_fd);
+        return NULL;
+    }
+
+    const char *key = "num";
+
+    if (function_id == HELLOWORLD)
+    {
+        key = "str";
+    }
+    else if (function_id == PINGPONG)
+    {
+        key = "Val";
+    }
+
+    const char *params = args;
+
+    if (strcmp(req.request_line.method, "POST") == 0)
+    {
+        params = req.body;
+
+        int form_content_type = 0;
+
+        for (int i = 0; i < req.header_count; i++)
+        {
+            if (strcasecmp(req.headers[i].key, "Content-Type") == 0 &&
+                strncasecmp(req.headers[i].value,
+                            "application/x-www-form-urlencoded", 33) == 0)
+            {
+                form_content_type = 1;
                 break;
             }
         }
 
-        if (function_id != -1)
+        if (form_content_type == 0)
         {
-            char* value = NULL;
+            send_error(client_fd, "415 Unsupported Media Type",
+                       "Unsupported POST content type");
 
-            if (args != NULL)
-            {
-                char* equal_sign = strchr(args, '=');
-
-                if (equal_sign)
-                {
-                    value = equal_sign + 1;
-                }
-            }
-
-            funcs[function_id](value, response_body, sizeof(response_body));
+            close(client_fd);
+            return NULL;
         }
-        else 
-        {
-            snprintf(response_body, sizeof(response_body), "404 NOT FOUND");
-        }
-        snprintf(body, sizeof(body), "WHATS UP WORLD\n%s ::: %s\n%d \n%s \n", path, args, function_id, response_body);
-
     }
 
-    size_t response_size = 0;
+    char *value = NULL;
 
-    char* http_response = create_http_response("200 OK", "text/plain", body, strlen(body), &response_size);
-    if (http_response != NULL)
+    int param_result = get_query_param(params, key, &value);
+
+    if (param_result == -1)
     {
-        send(client_fd, http_response, response_size, 0);
-        free(http_response);
+        send_error(client_fd, "400 Bad Request", "Invalid query parameter");
+
+        close(client_fd);
+        return NULL;
     }
 
+    funcs[function_id](value, response_body, sizeof(response_body));
+
+    free(value);
+
+    send_response(client_fd, "200 OK", response_body);
 
     close(client_fd);
     return NULL;
 }
+
+
+// Worker thread
 
 void *worker(void *arg)
 {
@@ -163,7 +577,7 @@ void *worker(void *arg)
 
         if (client_args == NULL)
         {
-            perror("malloc");
+            fprintf(stderr, "Error: malloc failed\n");
             close(client_fd);
             continue;
         }
@@ -176,20 +590,37 @@ void *worker(void *arg)
     return NULL;
 }
 
-int main(int argc, char *argv[]) 
-{
 
-    if((strcmp(argv[1], "s") != 0 && strcmp(argv[1], "m") != 0 && strcmp(argv[1], "t") != 0))
+// Main
+
+int main(int argc, char *argv[])
+{
+    if (argc < 3 ||
+        (strcmp(argv[1], "s") != 0 &&
+         strcmp(argv[1], "m") != 0 &&
+         strcmp(argv[1], "t") != 0))
     {
-        fprintf(stderr, "Error 1");
+        fprintf(stderr, "Usage: %s <s|m|t> <port> [num_threads]\n", argv[0]);
         return 1;
     }
 
     int thread_pool_mode = strcmp(argv[1], "t") == 0;
 
-    if ((thread_pool_mode && argc != 4) || (!thread_pool_mode && argc != 3))
+    if ((thread_pool_mode && argc != 4) ||
+        (!thread_pool_mode && argc != 3))
     {
-        fprintf(stderr, "Error 7");
+        fprintf(stderr, "Error: Invalid number of arguments\n");
+        return 1;
+    }
+
+    char *end;
+    errno = 0;
+
+    long port = strtol(argv[2], &end, 10);
+
+    if (errno != 0 || *argv[2] == '\0' || *end != '\0' || port < 1 || port > 65535)
+    {
+        fprintf(stderr, "Error: Invalid port\n");
         return 1;
     }
 
@@ -198,31 +629,33 @@ int main(int argc, char *argv[])
     if (thread_pool_mode)
     {
         char *thread_end;
+        errno = 0;
+
         long count = strtol(argv[3], &thread_end, 10);
 
-        if (*argv[3] == '\0' || *thread_end != '\0' || count < 1 || count > 256)
+        if (errno != 0 || *argv[3] == '\0' || *thread_end != '\0' || count < 1 || count > 256)
         {
-            fprintf(stderr, "Error 8");
+            fprintf(stderr, "Error: Invalid thread count\n");
             return 1;
         }
 
         num_threads = (int)count;
     }
 
-    char *end;
-    long port = strtol(argv[2], &end, 10);
-   
-    if(*argv[2] == '\0' || *end != '\0' || port < 1|| port > 65535)
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (server_fd == -1)
     {
-        fprintf(stderr, "Error 2");
+        fprintf(stderr, "Error: socket failed\n");
         return 1;
     }
 
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    
-    if (server_fd == -1)
+    int opt = 1;
+
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1)
     {
-        fprintf(stderr, "Error 3");
+        fprintf(stderr, "Error: setsockopt failed\n");
+        close(server_fd);
         return 1;
     }
 
@@ -234,19 +667,21 @@ int main(int argc, char *argv[])
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == -1)
     {
-        fprintf(stderr, "Error 4");
+        fprintf(stderr, "Error: bind failed\n");
         close(server_fd);
         return 1;
     }
 
     if (listen(server_fd, 128) == -1)
     {
-        fprintf(stderr, "Error 5");
+        fprintf(stderr, "Error: listen failed\n");
         close(server_fd);
         return 1;
     }
 
     printf("===============cflask is in business===============\n");
+    printf("Mode: %s\n", argv[1]);
+    printf("Port: %ld\n", port);
 
     if (thread_pool_mode)
     {
@@ -254,17 +689,13 @@ int main(int argc, char *argv[])
         {
             pthread_t thread;
 
-            int result = pthread_create(
-                &thread,
-                NULL,
-                worker,
-                NULL
-            );
+            int result = pthread_create(&thread, NULL, worker, NULL);
 
             if (result != 0)
             {
-                fprintf(stderr, "Error 9");
-                exit(EXIT_FAILURE);
+                fprintf(stderr, "Error: Worker creation failed\n");
+                close(server_fd);
+                return 1;
             }
 
             pthread_detach(thread);
@@ -273,38 +704,97 @@ int main(int argc, char *argv[])
         printf("Thread pool initialized with %d workers\n", num_threads);
     }
 
-    while(1)
+    struct sigaction action = {0};
+    action.sa_handler = shutdown_server;
+    sigemptyset(&action.sa_mask);
+
+    if (sigaction(SIGINT, &action, NULL) == -1)
+    {
+        fprintf(stderr, "Error: Could not register SIGINT handler\n");
+        return 1;
+    }
+
+    if (sigaction(SIGTERM, &action, NULL) == -1)
+    {
+        fprintf(stderr, "Error: Could not register SIGTERM handler\n");
+        return 1;
+    }
+
+    while (server_running)
     {
         int client_fd = accept(server_fd, NULL, NULL);
 
         if (client_fd == -1)
         {
-            fprintf(stderr, "Error 6");
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            fprintf(stderr, "Error: accept failed\n");
             continue;
         }
 
-        int *client_args = malloc(sizeof(int));
-        *client_args = client_fd;
-        //handle_client(client_args);
+        struct timeval timeout;
 
-        if (strcmp(argv[1], "s") == 0)
+        timeout.tv_sec = 5;
+        timeout.tv_usec = 0;
+
+        if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == -1)
         {
-            handle_client(client_args);
+            fprintf(stderr, "Error: Could not set receive timeout\n");
+            close(client_fd);
+            continue;
+        }
+
+        if (setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == -1)
+        {
+            fprintf(stderr, "Error: Could not set send timeout\n");
+            close(client_fd);
+            continue;
+        }
+
+        if (thread_pool_mode)
+        {
+            enqueue(client_fd);
         }
         else
         {
-            pthread_t thread;
-            int result = pthread_create(&thread, NULL, handle_client, client_args);
+            int *client_args = malloc(sizeof(int));
 
-            if (result)
+            if (client_args == NULL)
             {
-                fprintf(stderr, "Error 7");
-                free(client_args);
+                fprintf(stderr, "Error: malloc failed\n");
                 close(client_fd);
                 continue;
             }
-            pthread_detach(thread);
+
+            *client_args = client_fd;
+
+            if (strcmp(argv[1], "s") == 0)
+            {
+                handle_client(client_args);
+            }
+            else
+            {
+                pthread_t thread;
+
+                int result = pthread_create(&thread, NULL, handle_client, client_args);
+
+                if (result != 0)
+                {
+                    fprintf(stderr, "Error: Thread creation failed\n");
+                    free(client_args);
+                    close(client_fd);
+                    continue;
+                }
+
+                pthread_detach(thread);
+            }
         }
     }
-}
 
+    close(server_fd);
+    printf("\ncflask downed \n");
+    return 0;
+}
