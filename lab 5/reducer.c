@@ -104,8 +104,26 @@ static int is_stale(const msg_t *m)
  */
 static void handle_marker(int j, long c)
 {
-    (void)j;
-    (void)c;
+    if (!blocked[j])
+    {
+        blocked[j] = 1;
+        nblocked++;
+    }
+
+    if (nblocked == args->M)
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/r%d_%ld", CKPT_DIR, args->id, c);
+
+        if (wcmap_save(counts, path)!=0) fail("wcmap_save");
+        memset(blocked, 0, sizeof(blocked));
+        nblocked = 0;
+
+        to_coordinator( c == LAST_CHECKPOINT_ID ? MT_LAST_CHECKPOINT_ACK : MT_CHECKPOINT_ACK , c);
+    }
+
+    // (void)j;
+    // (void)c;
 }
 
 /* PROVIDED: one message from connection i. */
