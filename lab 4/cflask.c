@@ -266,6 +266,10 @@ void *handle_client(void *arg)
 
     char *path = req.request_line.uri;
     char *args = strchr(path, '?');
+
+    printf("Method: %s\n", req.request_line.method);
+    printf("URI: %s\n", path);
+    
     if (args != NULL)
         *args++ = '\0';
 
@@ -416,8 +420,11 @@ int main(int argc, char *argv[])
     printf("cflask mode %s listening on port %ld\n", argv[1], port);
     fflush(stdout);
 
+    printf("===============cflask is in business===============\n");
     while (1)
     {
+        printf("Mode: %s\n", argv[1]);
+        printf("Port: %ld\n", port);
         int fd = accept(server_fd, NULL, NULL);
         if (fd < 0)
         {
