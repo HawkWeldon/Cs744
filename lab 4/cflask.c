@@ -259,13 +259,9 @@ int main(int argc, char *argv[])
     {
         printf("Mode: %s\n", argv[1]);
         printf("Port: %ld\n", port);
+        
         int fd = accept(server_fd, NULL, NULL);
-        if (fd < 0)
-        {
-            if (errno == EINTR)
-                continue;
-            continue;
-        }
+        if (fd < 0) continue;
 
         if (argv[1][0] == 's')
             handle_client((void *)(intptr_t)fd);
