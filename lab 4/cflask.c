@@ -49,31 +49,6 @@ int dequeue(void)
     return fd;
 }
 
-
-int send_all(int client_fd, const char *data, size_t length)
-{
-    size_t sent = 0;
-
-    while (sent < length)
-    {
-        ssize_t n = send(client_fd, data + sent, length - sent, MSG_NOSIGNAL);
-
-        if (n < 0 && errno == EINTR)
-        {
-            continue;
-        }
-
-        if (n <= 0)
-        {
-            return -1;
-        }
-
-        sent += (size_t)n;
-    }
-
-    return 0;
-}
-
 void send_response(int client_fd, const char *status, const char *body)
 {
     size_t response_size = 0;
@@ -89,145 +64,10 @@ void send_response(int client_fd, const char *status, const char *body)
     if (http_response == NULL)
         return;
 
-    send_all(client_fd, http_response, response_size);
+    send(client_fd, http_response, response_size, MSG_NOSIGNAL);
     free(http_response);
 }
 
-int hex_value(char c)
-{
-    if (c >= '0' && c <= '9')
-    {
-        return c - '0';
-    }
-    else if (c >= 'a' && c <= 'f')
-    {
-        return c - 'a' + 10;
-    }
-    else if (c >= 'A' && c <= 'F')
-    {
-        return c - 'A' + 10;
-    }
-
-    return -1;
-}
-
-int url_decode(char *str)
-{
-    char *src = str;
-    char *dst = str;
-
-    while (*src != '\0')
-    {
-        if (*src == '%')
-        {
-            if (src[1] == '\0' || src[2] == '\0')
-            {
-                return -1;
-            }
-
-            int hi = hex_value(src[1]);
-            int lo = hex_value(src[2]);
-
-            if (hi == -1 || lo == -1)
-            {
-                return -1;
-            }
-
-            char decoded = (char)((hi << 4) | lo);
-
-            if (decoded == '\0')
-            {
-                return -1;
-            }
-
-            *dst = decoded;
-            dst++;
-            src += 3;
-        }
-        else if (*src == '+')
-        {
-            *dst = ' ';
-            dst++;
-            src++;
-        }
-        else
-        {
-            *dst = *src;
-            dst++;
-            src++;
-        }
-    }
-
-    *dst = '\0';
-
-    return 0;
-}
-
-int get_query_param(const char *query, const char *key, char **result)
-{
-    *result = NULL;
-
-    if (query == NULL || key == NULL)
-    {
-        return 0;
-    }
-
-    size_t key_len = strlen(key);
-
-    while (*query != '\0')
-    {
-        const char *end = strchr(query, '&');
-
-        if (end == NULL)
-        {
-            end = query + strlen(query);
-        }
-
-        const char *equal_sign = memchr(query, '=', end - query);
-
-        if (equal_sign != NULL)
-        {
-            size_t current_key_len = equal_sign - query;
-
-            if (current_key_len == key_len && strncmp(query, key, key_len) == 0)
-            {
-                const char *value = equal_sign + 1;
-                size_t value_len = end - value;
-
-                char *copy = malloc(value_len + 1);
-
-                if (copy == NULL)
-                {
-                    return -1;
-                }
-
-                memcpy(copy, value, value_len);
-                copy[value_len] = '\0';
-
-                if (url_decode(copy) == -1)
-                {
-                    free(copy);
-                    return -1;
-                }
-
-                *result = copy;
-
-                return 1;
-            }
-        }
-
-        if (*end == '\0')
-        {
-            break;
-        }
-
-        query = end + 1;
-    }
-
-    return 0;
-}
-
-// Each client connection is handled here, in any of the three modes.
 void *handle_client(void *arg)
 {
     int fd = (int)(intptr_t)arg;
@@ -249,7 +89,11 @@ void *handle_client(void *arg)
     ParsedRequest req = {0};
     parse_http_request(buffer, &req);
 
-    if (req.request_line.method[0] == '\0' || req.request_line.uri[0] == '\0')
+    printf("Method: %s\n", req.request_line.method ? req.request_line.method : "");
+    printf("URI: %s\n", req.request_line.uri ? req.request_line.uri : "");
+
+    if (req.request_line.method == NULL || req.request_line.uri == NULL ||
+        req.request_line.method[0] == '\0' || req.request_line.uri[0] == '\0')
     {
         status = "400 Bad Request";
         message = "Invalid request line";
@@ -266,10 +110,6 @@ void *handle_client(void *arg)
 
     char *path = req.request_line.uri;
     char *args = strchr(path, '?');
-
-    printf("Method: %s\n", req.request_line.method);
-    printf("URI: %s\n", path);
-    
     if (args != NULL)
         *args++ = '\0';
 
@@ -303,12 +143,6 @@ void *handle_client(void *arg)
         goto finish;
     }
 
-    const char *key = "num";
-    if (id == HELLOWORLD)
-        key = "str";
-    else if (id == PINGPONG)
-        key = "Val";
-
     if (is_post)
     {
         int valid = 0;
@@ -330,22 +164,22 @@ void *handle_client(void *arg)
         args = req.body;
     }
 
-    if (get_query_param(args, key, &value) == -1)
+    if (args != NULL)
     {
-        status = "400 Bad Request";
-        message = "Invalid query parameter";
-        goto finish;
+        char *equal = strchr(args, '=');
+        if (equal != NULL)
+            value = equal + 1;
     }
 
     funcs[id](value, body, sizeof(body));
     message = body;
 
 finish:
-    send_response(fd, status, message);
-    free(value);
+    send_response(fd, status, message != NULL ? message : "");
     close(fd);
     return NULL;
 }
+
 
 void *worker(void *arg)
 {
